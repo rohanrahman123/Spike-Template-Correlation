@@ -1,0 +1,104 @@
+% =========================================================================
+% SPIKE TEMPLATE CORRELATION CODE
+% Author(s): Rohan Rahman, David Vaughan
+% =========================================================================
+
+
+%% 1. READ IN SPIKE TEMPLATE
+% -------------------------------------------------------------------------
+firsttempvoltagemap  = edfread('Location of spike template stored as EDF file');
+tabletempvoltagemap  = timetable2table(firsttempvoltagemap);
+
+% Extract voltage map values into cell array, then convert to double
+for a = 2:size(tabletempvoltagemap, 2)
+    celltempvoltagemap(:, a-1) = tabletempvoltagemap.(a);
+end
+doubletempvoltagemap = cell2mat(celltempvoltagemap);
+tempvoltagemap       = doubletempvoltagemap(1, :); % 1 x nChannels
+
+
+%% 2. CALCULATE CORRELATION COEFFICIENT TIME COURSE
+% -------------------------------------------------------------------------
+% EEGData is stored in BrainVision Analyser (BVA) as nTimepoints x nChannels
+
+ntimepoints  = size(EEGData, 1);
+corrtimecourse = zeros(ntimepoints, 1);
+
+for i = 1:ntimepoints
+    correlation    = corrcoef(EEGData(i, :), tempvoltagemap);
+    corrtimecourse(i) = correlation(1, 2);
+end
+
+% Square the correlation time course to create the regressor
+regressor = corrtimecourse .^ 2;
+
+% Save outputs
+dlmwrite('Location where you want the time course of the correlation coefficient to be stored', corrtimecourse);
+dlmwrite('Location where you want the square of the correlation coefficient time course to be stored', regressor);
+
+
+%% 3. DEMEAN THE REGRESSOR
+% -------------------------------------------------------------------------
+showmean    = mean(regressor, 'omitnan')   % mean r^2 value
+showstd     = std(regressor,  'omitnan')   % standard deviation
+
+regressornow = regressor - mean(regressor, 'omitnan');
+regressor    = regressornow';
+
+
+%% 4. CONVOLVE REGRESSOR WITH HRF
+% -------------------------------------------------------------------------
+% Convolve EEG-spike correlation with HRF then downsample to TR
+% Author: David Vaughan, 31 Jan 2021
+
+addpath('Location where SPM12 is downloaded');
+spm('AsciiWelcome');
+
+EEG_sample_rate = 250; % Hz
+% TR = 3.0;             % MRI repetition time (s) — adjust per fMRI system
+
+% Create SPM basis function set
+s   = struct('dt',   1 / EEG_sample_rate, ...
+             'name', 'hrf (with time and dispersion derivatives)');
+xBF = spm_get_bf(s);
+
+% Convolve HRF with the regressor time course
+x(:, 1) = conv(regressor, xBF.bf(:, 1));
+x(:, 2) = conv(regressor, xBF.bf(:, 2));
+x(:, 3) = conv(regressor, xBF.bf(:, 3));
+
+% Trim convolved output to length of original regressor
+x = x(1:length(regressor), :);
+
+
+%% 5. DOWNSAMPLE TO TR
+% -------------------------------------------------------------------------
+% Extract R128 marker positions from BVA Markers struct
+
+NextMarkers = struct([]);
+for h = 1:length(Markers)
+    if Markers(h).Description == "R128"
+        NextMarkers = [NextMarkers, Markers(h)];
+    end
+end
+
+NextMarkersx = zeros(1, length(NextMarkers));
+for u = 1:length(NextMarkers)
+    NextMarkersx(u) = NextMarkers(u).Position;
+end
+
+% Average convolved regressor within each TR window
+finaltriggers = [NextMarkersx, length(x)];
+n             = size(finaltriggers, 2) - 1;
+NewRegressor  = zeros(n, 3);
+
+for k = 1:n
+    NewRegressor(k, 1) = mean(x(finaltriggers(k):finaltriggers(k+1), 1), 'omitnan');
+    NewRegressor(k, 2) = mean(x(finaltriggers(k):finaltriggers(k+1), 2), 'omitnan');
+    NewRegressor(k, 3) = mean(x(finaltriggers(k):finaltriggers(k+1), 3), 'omitnan');
+end
+
+
+%% 6. SAVE FINAL REGRESSOR
+% -------------------------------------------------------------------------
+dlmwrite('Location you would like regressor to be saved', NewRegressor, 'delimiter', '\t');
